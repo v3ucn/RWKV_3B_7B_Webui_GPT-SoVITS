@@ -41,14 +41,14 @@ except NVMLError as error:
     print(error)
 
 
-def read_now(text):
+def read_now(text,api_url):
 
     if text == "":
         return "请输入要播放的文本"
 
     data = json.dumps({"text":text})#转换为json字符串
     headers = {"Content-Type":"application/json"}#指定提交的是json
-    r = requests.post("http://localhost:9880/tts_to_audio/",data=data,headers=headers)
+    r = requests.post(f"{api_url}",data=data,headers=headers)
 
     with open('./output_audio.wav', 'wb') as audio_file:
         audio_file.write(r.content)
@@ -181,8 +181,8 @@ def main():
             submit.click(evaluate, [prompt, token_count, temperature, top_p, presence_penalty, count_penalty], [output])
             clear.click(lambda: None, [], [output])
             data.click(lambda x: x, [data], [prompt, token_count, temperature, top_p, presence_penalty, count_penalty])
-
-            read_b.click(read_now,[output],[])
+            api_url = gr.Textbox(label="GPT-SoVITS接口地址", value="http://localhost:9880/tts_to_audio/")
+            read_b.click(read_now,[output,api_url],[])
 
     demo.queue()
     demo.launch(server_name="0.0.0.0",inbrowser=True)
