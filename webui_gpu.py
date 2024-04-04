@@ -1,5 +1,15 @@
 import gradio as gr
 import os, gc, copy, torch
+
+import os, sys
+
+"""
+初始化环境
+"""
+current_path = os.path.dirname(os.path.abspath(__file__))
+os.environ["PATH"] += f";{current_path}/runtime/Scripts;"
+
+
 from datetime import datetime
 from pynvml import *
 
