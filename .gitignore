@@ -14,5 +14,6 @@ ckpt-0.meta
 tokenizer.json
 *.model
 runtime/
+db/
 
 

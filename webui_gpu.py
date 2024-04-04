@@ -1,7 +1,12 @@
 import gradio as gr
 import os, gc, copy, torch
+import sys
 
-import os, sys
+from langchain.document_loaders import TextLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
 
 """
 初始化环境
@@ -36,6 +41,8 @@ os.environ["RWKV_CUDA_ON"] = '1'
 
 from rwkv.model import RWKV
 from rwkv.utils import PIPELINE, PIPELINE_ARGS
+
+from langchain.vectorstores import FAISS
 
 pipeline = None
 model = None
@@ -92,6 +99,156 @@ Response:"""
 Assistant: Hi. I am your assistant and I will provide expert full response in full details. Please feel free to ask any question and I will always answer it.
 User: {instruction}
 Assistant:"""
+
+
+def search_text(query_text):
+
+    """
+    查询文本
+    """
+    embeddings = HuggingFaceEmbeddings()
+    query_text = query_text
+
+    """
+    向量数据库查询
+    """
+    
+
+    db = FAISS.load_local('./db', embeddings,allow_dangerous_deserialization=True)
+    docs = db.similarity_search(query_text)
+    for doc in docs:
+        print(doc)
+
+    doc_strs = []
+    for doc in docs:
+        doc_strs.append(doc.page_content)
+    doc_strs = '\n'.join(doc_strs)
+
+    return doc_strs
+
+
+def load_text(query_text,text_path):
+
+    """
+    加载文档
+    """
+
+    if query_text == "" or text_path == "":
+        return "请输入要加载的文档路径和提示词"
+
+    loader = TextLoader(f"./{text_path}", encoding="utf-8")
+    docs = loader.load()
+
+    """
+    分割文档
+    """
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=100,
+        chunk_overlap=20,
+        length_function=len
+    )
+    texts = text_splitter.split_documents(docs)
+    text_strs = []
+    for text in texts:
+        text_strs.append(text.page_content)
+
+    """
+    文档向量化
+    """
+    
+
+    embeddings = HuggingFaceEmbeddings()
+    query_text = query_text
+    query_result = embeddings.embed_query(query_text)
+    doc_result = embeddings.embed_documents(text_strs)
+
+    """
+    向量化存储
+    """
+    
+    db = FAISS.from_documents(texts, embeddings)
+    docs = db.similarity_search_by_vector(query_result)
+    for doc in docs:
+        print(doc)
+    db.save_local('./db')
+
+    return "向量数据库写入成功"
+
+# Evaluation logic
+def evaluate_db(
+    ctx,
+    token_count=200,
+    temperature=1.0,
+    top_p=0.7,
+    presencePenalty = 0.1,
+    countPenalty = 0.1,
+):
+    
+    embeddings = HuggingFaceEmbeddings()
+    query_text = ctx
+
+    """
+    向量数据库查询
+    """
+
+    db = FAISS.load_local('./db', embeddings,allow_dangerous_deserialization=True)
+    docs = db.similarity_search(query_text)
+    doc_strs = []
+    for doc in docs:
+        doc_strs.append(doc.page_content)
+    doc_strs = '\n'.join(doc_strs)
+
+    """
+    构建提示词
+    """
+    prompt = PromptTemplate.from_template("Instruction: {query}\n\nInput: {doc}\n\nResponse:")
+    prompt = prompt.format(doc=doc_strs, query=query_text)
+
+    args = PIPELINE_ARGS(temperature = max(0.2, float(temperature)), top_p = float(top_p),
+                     alpha_frequency = countPenalty,
+                     alpha_presence = presencePenalty,
+                     token_ban = [], # ban the generation of some tokens
+                     token_stop = [0]) # stop generation whenever you see any token here
+    ctx = prompt.strip()
+    all_tokens = []
+    out_last = 0
+    out_str = ''
+    occurrence = {}
+    state = None
+    for i in range(int(token_count)):
+        out, state = model.forward(pipeline.encode(ctx)[-ctx_limit:] if i == 0 else [token], state)
+        for n in occurrence:
+            out[n] -= (args.alpha_presence + occurrence[n] * args.alpha_frequency)
+
+        token = pipeline.sample_logits(out, temperature=args.temperature, top_p=args.top_p)
+        if token in args.token_stop:
+            break
+        all_tokens += [token]
+        for xxx in occurrence:
+            occurrence[xxx] *= 0.996
+        if token not in occurrence:
+            occurrence[token] = 1
+        else:
+            occurrence[token] += 1
+
+        tmp = pipeline.decode(all_tokens[out_last:])
+        if '\ufffd' not in tmp:
+            out_str += tmp
+            yield out_str.strip()
+            out_last = i + 1
+
+    if HAS_GPU == True :
+        gpu_info = nvmlDeviceGetMemoryInfo(gpu_h)
+        print(f'vram {gpu_info.total} used {gpu_info.used} free {gpu_info.free}')
+
+    del out
+    del state
+    gc.collect()
+
+    if HAS_GPU == True :
+        torch.cuda.empty_cache()
+
+    yield out_str.strip()
 
 # Evaluation logic
 def evaluate(
@@ -174,9 +331,21 @@ def main():
 
             with gr.Row():
                 with gr.Column():
-                    prompt = gr.Textbox(lines=2, label="Prompt", value="""边儿上还有两条腿，修长、结实，光滑得出奇，潜伏着
-    媚人的活力。他紧张得脊梁都皱了起来。但他不动声色。""")
-                    token_count = gr.Slider(10, 500, label="Max Tokens", step=10, value=200)
+                    db_query = gr.Textbox(label="向量提示词")
+                    db_text = gr.Textbox(label="文本文件名")
+
+                    db_add = gr.Button("添加向量数据库", variant="primary")
+                    db_search = gr.Button("查询向量数据库", variant="primary")
+                    db_output = gr.Textbox(label="向量数据库写入结果")
+
+            db_add.click(load_text, [db_query,db_text], [db_output])
+            db_search.click(search_text, [db_query], [db_output])
+
+
+            with gr.Row():
+                with gr.Column():
+                    prompt = gr.Textbox(lines=2, label="Prompt", value="""边儿上还有两条腿，修长、结实，光滑得出奇，潜伏着媚人的活力。""")
+                    token_count = gr.Slider(10, 8000, label="Max Tokens", step=10, value=200)
                     temperature = gr.Slider(0.2, 2.0, label="Temperature", step=0.1, value=1.0)
                     top_p = gr.Slider(0.0, 1.0, label="Top P", step=0.05, value=0.3)
                     presence_penalty = gr.Slider(0.0, 1.0, label="Presence Penalty", step=0.1, value=1)
@@ -184,14 +353,17 @@ def main():
                 with gr.Column():
                     with gr.Row():
                         submit = gr.Button("开始推理", variant="primary")
+                        submit_db = gr.Button("根据向量数据库推理", variant="primary")
                         clear = gr.Button("Clear", variant="secondary")
                     output = gr.Textbox(label="Output", lines=5)
+                    api_url = gr.Textbox(label="GPT-SoVITS接口地址", value="http://localhost:9880/tts_to_audio/")
                     read_b = gr.Button("开始朗读", variant="primary")
             data = gr.Dataset(components=[prompt, token_count, temperature, top_p, presence_penalty, count_penalty], label="Example Instructions", headers=["Prompt", "Max Tokens", "Temperature", "Top P", "Presence Penalty", "Count Penalty"])
             submit.click(evaluate, [prompt, token_count, temperature, top_p, presence_penalty, count_penalty], [output])
+            submit_db.click(evaluate_db, [db_query, token_count, temperature, top_p, presence_penalty, count_penalty], [output])
             clear.click(lambda: None, [], [output])
             data.click(lambda x: x, [data], [prompt, token_count, temperature, top_p, presence_penalty, count_penalty])
-            api_url = gr.Textbox(label="GPT-SoVITS接口地址", value="http://localhost:9880/tts_to_audio/")
+            
             read_b.click(read_now,[output,api_url],[])
 
     demo.queue()
